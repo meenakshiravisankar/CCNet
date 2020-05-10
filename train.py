@@ -14,9 +14,10 @@ import os
 from tqdm import tqdm
 import os.path as osp
 from networks.ccnet import Res_Deeplab
-from dataset.datasets import CSDataSet
+from dataset.datasets import IddSegmentationTrain
 #import matplotlib.pyplot as plt
 import random
+import mlflow
 import timeit
 import logging
 from tensorboardX import SummaryWriter
@@ -32,20 +33,20 @@ start = timeit.default_timer()
 
 IMG_MEAN = np.array((104.00698793,116.66876762,122.67891434), dtype=np.float32)
 
-BATCH_SIZE = 8
-DATA_DIRECTORY = 'cityscapes'
-DATA_LIST_PATH = './dataset/list/cityscapes/train.lst'
-IGNORE_LABEL = 255
+BATCH_SIZE = 4
+DATA_DIRECTORY = 'idd'
+DATA_LIST_PATH = './dataset/list/idd/train_1.lst'
+IGNORE_LABEL = 26
 INPUT_SIZE = '769,769'
-LEARNING_RATE = 1e-2
+LEARNING_RATE = 5e-3
 MOMENTUM = 0.9
-NUM_CLASSES = 19
-NUM_STEPS = 60000
+NUM_CLASSES = 26
+NUM_STEPS = 80000
 POWER = 0.9
 RANDOM_SEED = 1234
 RESTORE_FROM = './dataset/resnet101-imagenet.pth'
 SAVE_NUM_IMAGES = 2
-SAVE_PRED_EVERY = 10000
+SAVE_PRED_EVERY = 4000
 SNAPSHOT_DIR = 'snapshots/'
 WEIGHT_DECAY = 0.0005
 
@@ -123,6 +124,10 @@ def get_arguments():
 
 args = get_arguments()
 
+# mlflow to log
+exp_id = mlflow.set_experiment(args.experiment_name)
+mlflow.start_run(experiment_id=exp_id)
+mlflow.log_param("train_configs", vars(args))
 
 def lr_poly(base_lr, iter, max_iter, power):
     return base_lr*((1-float(iter)/max_iter)**(power))
@@ -187,14 +192,14 @@ def main():
         os.makedirs(args.snapshot_dir)
 
 
-    trainloader = data.DataLoader(CSDataSet(args.data_dir, args.data_list, max_iters=args.num_steps*args.batch_size, crop_size=input_size, 
-                    scale=args.random_scale, mirror=args.random_mirror, mean=IMG_MEAN), 
+    trainloader = data.DataLoader(IddSegmentationTrain(args.data_dir, args.data_list, max_iters=args.num_steps*args.batch_size, crop_size=input_size, 
+                    scale=args.random_scale, mirror=args.random_mirror), 
                     batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
 
     optimizer = optim.SGD([{'params': filter(lambda p: p.requires_grad, deeplab.parameters()), 'lr': args.learning_rate }], 
                 lr=args.learning_rate, momentum=args.momentum,weight_decay=args.weight_decay)
     optimizer.zero_grad()
-
+    loss_avg = 0
     for i_iter, batch in enumerate(trainloader):
         i_iter += args.start_iters
         images, labels, _, _ = batch
@@ -215,7 +220,7 @@ def main():
         if i_iter % 100 == 0:
             writer.add_scalar('learning_rate', lr, i_iter)
             writer.add_scalar('loss', loss.data.cpu().numpy(), i_iter)
-
+        loss_avg = loss_avg + loss.data.cpu().numpy()
         # if i_iter % 5000 == 0:
         #     images_inv = inv_preprocess(images, args.save_num_images, IMG_MEAN)
         #     labels_colors = decode_labels(labels, args.save_num_images, args.num_classes)
@@ -226,8 +231,13 @@ def main():
         #         writer.add_image('Images/'+str(index), img, i_iter)
         #         writer.add_image('Labels/'+str(index), lab, i_iter)
         #         writer.add_image('preds/'+str(index), preds_colors[index], i_iter)
+        if i_iter % 20 == 0 and i_iter:
+            print('iter = {} of {} completed, loss = {}'.format(i_iter, args.num_steps, loss.data.cpu().numpy()))
+            loss_avg = 0
 
-        print('iter = {} of {} completed, loss = {}'.format(i_iter, args.num_steps, loss.data.cpu().numpy()))
+        # mlflow logging
+        mlflow.log_metric(key="loss", value=float(loss.data.cpu().numpy()), step=int(i_iter))
+        mlflow.log_metric(key="learning_rate", value=lr, step=int(i_iter))
 
         if i_iter >= args.num_steps-1:
             print('save model ...')
